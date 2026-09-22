@@ -7,6 +7,7 @@ using SwiftlyS2.Shared.Trace;
 
 namespace Fixes;
 
+// Ported from zer0.k's RampFix (originally written for ModSharp by Nukoooo) to SwiftlyS2.
 
 public partial class Fixes
 {
@@ -20,6 +21,9 @@ public partial class Fixes
     private const int RampFixPierceSteps = 10;
     private const float RampFixNewRampThreshold = 0.95f;
     private const float RampFixFltEpsilon = 1.19209e-07f;
+    private const float RampFixUnitPlaneLengthSq = 0.99f * 0.99f;
+    private const float RampFixMinMoveDistance = 0.03125f;
+    private const float RampFixMinMoveDistanceSq = RampFixMinMoveDistance * RampFixMinMoveDistance;
 
     private static readonly Vector RampFixEmptyVector = new();
     private static readonly Vector[] RampFixOffsetDirections = BuildRampFixOffsetDirections();
@@ -117,27 +121,27 @@ public partial class Fixes
 
         _rampFixDidTpm[slot] = true;
 
-        if (mv.Velocity.LengthSquared() == 0f)
+        if (mv.Velocity == Vector.Zero)
         {
             return;
         }
 
-        if (pawn.GroundEntity.Raw != 0xFFFFFFFFu)
+        if (!pawn.GroundEntity.IsValid)
+        {
+            var overrode = RampFixPreTryPlayerMove(pawn,
+                                                   slot,
+                                                   mv,
+                                                   ctx.Params.FirstDest,
+                                                   ctx.Params.FirstTrace,
+                                                   out var tpmOrigin,
+                                                   out var tpmVelocity);
+
+            _rampFixTpmCandidate[slot] = new RampFixTpmCandidate(overrode, tpmOrigin, tpmVelocity);
+        }
+        else
         {
             _rampFixLastValidPlaneNormal[slot] = RampFixEmptyVector;
-
-            return;
         }
-
-        var overrode = RampFixPreTryPlayerMove(pawn,
-                                               slot,
-                                               mv,
-                                               ctx.Params.FirstDest,
-                                               ctx.Params.FirstTrace,
-                                               out var tpmOrigin,
-                                               out var tpmVelocity);
-
-        _rampFixTpmCandidate[slot] = new RampFixTpmCandidate(overrode, tpmOrigin, tpmVelocity);
     }
 
     private void OnRampFixTryPlayerMovePost(ref TryPlayerMoveMovementPostContext ctx)
@@ -600,7 +604,7 @@ public partial class Fixes
                 // Gate on the RAW normal being near unit-length: a shorter one is a
                 // deformed plane we must not start tracking. (Length() > 0.99f, squared to
                 // avoid the sqrt.)
-                if (pmPlaneNormal.LengthSquared() > 0.99f * 0.99f)
+                if (pmPlaneNormal.LengthSquared() > RampFixUnitPlaneLengthSq)
                 {
                     lastPlane = pmN;
                 }
@@ -611,7 +615,7 @@ public partial class Fixes
             var fraction = pmFraction;
 
             // original: fraction * |velocity| > 0.03125 - squared to avoid the sqrt
-            if (fraction * fraction * velocity.LengthSquared() > 0.03125f * 0.03125f || fraction > 0.03125f)
+            if (fraction * fraction * velocity.LengthSquared() > RampFixMinMoveDistanceSq || fraction > RampFixMinMoveDistance)
             {
                 allFraction += fraction;
                 start       =  pmEndPosition;

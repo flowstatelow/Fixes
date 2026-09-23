@@ -39,7 +39,7 @@ public partial class Fixes(ISwiftlyCore core) : BasePlugin(core)
         Config = provider.GetRequiredService<IOptionsMonitor<FixesConfig>>();
 
         InitGameBanFixes();
-        InitInputActivatorCrashFix();
+        // InitInputActivatorCrashFix();
         InitVoiceFix();
         InitSvCheatsFix();
         InitJumpSpamFix();

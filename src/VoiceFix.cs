@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using SwiftlyS2.Shared.Events;
 using SwiftlyS2.Shared.Misc;
 using SwiftlyS2.Shared.NetMessages;
@@ -6,42 +5,57 @@ using SwiftlyS2.Shared.ProtobufDefinitions;
 
 namespace Fixes;
 
-internal sealed class VoiceRateLimit
-{
-    private readonly Lock sync = new();
-    private long windowStart = Environment.TickCount64;
-    private int callCount;
-
-    public bool IsExceeded()
-    {
-        lock (sync)
-        {
-            var now = Environment.TickCount64;
-            if (now - windowStart >= 1000)
-            {
-                windowStart = now;
-                callCount = 0;
-            }
-
-            return ++callCount > 128;
-        }
-    }
-}
-
 public partial class Fixes
 {
-    private ConcurrentDictionary<int, ulong> playerSeeds = [];
-    private readonly ConcurrentDictionary<int, VoiceRateLimit> playerVoiceRateLimits = [];
     private ulong GlobalSeed = 0;
     private bool enableVoiceFix = false;
 
-    private void InitVoiceFix()
+    private Guid? voiceDataSendHookId;
+    private Guid? clientVoiceHookId;
+
+    private void SetVoiceFixEnabled(bool enabled)
     {
-        enableVoiceFix = Config.CurrentValue.EnableVoiceFix;
-        Config.OnChange((v, _) =>
+        if (enabled == enableVoiceFix)
         {
-            enableVoiceFix = v.EnableVoiceFix;
-        });
+            return;
+        }
+
+        enableVoiceFix = enabled;
+
+        if (enabled)
+        {
+            EnableVoiceFix();
+            return;
+        }
+
+        DisableVoiceFix();
+    }
+
+    private void EnableVoiceFix()
+    {
+        Core.Event.OnClientConnected += ConnectListener;
+        Core.Event.OnMapLoad += MapLoadListener;
+        voiceDataSendHookId = Core.NetMessage.HookServerMessageInternal<CSVCMsg_VoiceData>(OnVoiceDataSend);
+        clientVoiceHookId = Core.NetMessage.HookClientMessage<CCLCMsg_VoiceData>(OnClientVoice);
+    }
+
+    private void DisableVoiceFix()
+    {
+        Core.NetMessage.Unhook(voiceDataSendHookId!.Value);
+        Core.NetMessage.Unhook(clientVoiceHookId!.Value);
+        Core.Event.OnClientConnected -= ConnectListener;
+        Core.Event.OnMapLoad -= MapLoadListener;
+        voiceDataSendHookId = null;
+        clientVoiceHookId = null;
+        ResetVoiceState();
+    }
+
+    private void ResetVoiceState()
+    {
+        foreach (var player in Core.PlayerManager.GetAllPlayers())
+        {
+            player.FixesData.VoiceSeed = 0;
+        }
     }
 
     private ulong GetSeed()
@@ -59,60 +73,32 @@ public partial class Fixes
         return GlobalSeed;
     }
 
-    [EventListener<EventDelegates.OnClientConnected>]
     void ConnectListener(IOnClientConnectedEvent @event)
     {
-        if (!enableVoiceFix)
-            return;
+        var player = Core.PlayerManager.GetPlayer(@event.PlayerId);
+        if (player == null) return;
 
-        playerSeeds[@event.PlayerId] = GetSeed();
-        playerVoiceRateLimits.TryRemove(@event.PlayerId, out _);
+        player.FixesData.VoiceSeed = GetSeed();
     }
 
-    [EventListener<EventDelegates.OnMapLoad>]
-    void MapLoadListener(IOnMapLoadEvent @event)
-    {
-        if (!enableVoiceFix)
-            return;
+    void MapLoadListener(IOnMapLoadEvent @event) => ResetVoiceState();
 
-        playerSeeds.Clear();
-        playerVoiceRateLimits.Clear();
-    }
-
-    [ServerNetMessageInternalHandler]
     public HookResult OnVoiceDataSend(CSVCMsg_VoiceData msg, int playerid)
     {
-        if (!enableVoiceFix)
-            return HookResult.Continue;
+        var player = Core.PlayerManager.GetPlayer(playerid);
+        if (player == null) return HookResult.Continue;
 
-        if (!playerSeeds.TryGetValue(playerid, out var seed))
-        {
-            seed = GetSeed();
-            playerSeeds[playerid] = seed;
-        }
+        var data = player.FixesData;
+        if (data.VoiceSeed == 0) data.VoiceSeed = GetSeed();
 
-        msg.Xuid = seed + (ulong)msg.Entity;
+        msg.Xuid = data.VoiceSeed + (ulong)msg.Entity;
         return HookResult.Continue;
     }
 
-    [ClientNetMessageHandler]
     public HookResult OnClientVoice(CCLCMsg_VoiceData msg, int playerid)
     {
-        if (!enableVoiceFix)
-            return HookResult.Continue;
-
         if(!msg.Accessor.HasField("audio")) return HookResult.Stop;
 
-        var rateLimit = playerVoiceRateLimits.GetOrAdd(playerid, _ => new());
-        if (rateLimit.IsExceeded())
-            return HookResult.Stop;
-
         return HookResult.Continue;
-    }
-
-    [EventListener<EventDelegates.OnClientDisconnected>]
-    public void VoiceFixClientDisconnected(IOnClientDisconnectedEvent @event)
-    {
-        playerVoiceRateLimits.TryRemove(@event.PlayerId, out _);
     }
 }
